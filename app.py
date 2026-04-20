@@ -1,4 +1,4 @@
-      """
+"""
 NanoFormula AI — PLGA Nanoparticle Formulation Optimizer
 ML-driven virtual screening for particle size and encapsulation efficiency
 Developed by: Hardik Sood | IIT (BHU) Varanasi
@@ -385,4 +385,298 @@ if run:
             'LA/GA':                  random.choice(space['LA/GA']),
             'drug/polymer':           random.choice(space['drug/polymer']),
             'surfactant_concentration': random.choice(space['surfactant_concentration']),
+            'surfactant_HLB':         random.choice(space['surfactant_HLB']),
+            'aqueous/organic':        random.choice(space['aqueous/organic']),
+            'pH':                     random.choice(space['pH']),
+            'solvent_polarity_index': random.choice(space['solvent_polarity_index']),
+        } for _ in range(20000)]
+
+        FEATURES = ['polymer_MW','LA/GA','mol_MW','mol_logP','mol_TPSA',
+                    'mol_melting_point','mol_Hacceptors','mol_Hdonors','mol_heteroatoms',
+                    'drug/polymer','surfactant_concentration','surfactant_HLB',
+                    'aqueous/organic','pH','solvent_polarity_index']
+        cdf = pd.DataFrame(candidates)
+        cdf['pred_size'] = models['size'].predict(cdf[FEATURES])
+        cdf['pred_EE']   = np.clip(models['ee'].predict(cdf[FEATURES]), 0, 100)
+
+        ee_w = 1 - size_weight
+        cdf['size_score'] = np.where(cdf['pred_size'] <= target_size,
+                                     (target_size - cdf['pred_size']) / target_size, -0.5)
+        cdf['ee_score']   = (cdf['pred_EE'] - 50) / 50
+        cdf['score']      = size_weight * cdf['size_score'] + ee_w * cdf['ee_score']
+
+        top = cdf.nlargest(n_recs * 5, 'score')
+        diverse, used = [], []
+        for _, row in top.iterrows():
+            if not any(abs(row['drug/polymer'] - u) < 0.015 for u in used):
+                diverse.append(row); used.append(row['drug/polymer'])
+            if len(diverse) >= n_recs: break
+        if len(diverse) < n_recs:
+            diverse = [r for _, r in top.head(n_recs).iterrows()]
+        recs = pd.DataFrame(diverse).sort_values('pred_size').reset_index(drop=True)
+
+    hit_rate = (cdf['pred_size'] < target_size).sum()
+
+    st.markdown('<div class="box-success">✅ &nbsp; Optimization complete — 20,000 candidates screened. Top formulations ranked below.</div>',
+                unsafe_allow_html=True)
+    st.markdown(f"""
+    <div class="result-strip">
+        <div class="r-card"><div class="r-val">20,000</div><div class="r-lbl">Candidates</div></div>
+        <div class="r-card"><div class="r-val">{hit_rate:,}</div><div class="r-lbl">Within Target</div></div>
+        <div class="r-card"><div class="r-val">{recs['pred_size'].min():.1f}<span class="r-unit">nm</span></div><div class="r-lbl">Best Size</div></div>
+        <div class="r-card"><div class="r-val">{recs['pred_EE'].max():.1f}<span class="r-unit">%</span></div><div class="r-lbl">Best EE%</div></div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    tab1, tab2, tab3, tab4 = st.tabs([
+        "📋  Recommendations", "📊  Visual Analysis", "🔭  Search Space", "🧪  Lab Protocol"
+    ])
+
+    # ─── TAB 1: TABLE ───────────────────────────────────────────
+    with tab1:
+        st.markdown('<div class="sec-title"><span class="sec-dot"></span>Top Recommended Formulations</div>',
+                    unsafe_allow_html=True)
+        display = recs[['drug/polymer','polymer_MW','LA/GA','surfactant_concentration',
+                         'surfactant_HLB','aqueous/organic','pH','pred_size','pred_EE','score']].copy()
+        display.insert(0, 'Rank', [f'F{i+1}' for i in range(len(display))])
+        display.columns = ['Rank','Drug/Polymer','PLGA MW (kDa)','LA/GA','Surf. Conc (%)','Surf. HLB',
+                            'Aq/Org','pH','Pred. Size (nm)','Pred. EE (%)','Score']
+        st.dataframe(
+            display.style
+                .format({'Drug/Polymer':'{:.4f}','PLGA MW (kDa)':'{:.1f}','LA/GA':'{:.2f}',
+                         'Surf. Conc (%)':'{:.3f}','Surf. HLB':'{:.1f}','Aq/Org':'{:.2f}',
+                         'pH':'{:.2f}','Pred. Size (nm)':'{:.1f}','Pred. EE (%)':'{:.1f}','Score':'{:.4f}'})
+                .background_gradient(subset=['Pred. Size (nm)'], cmap='RdYlGn_r', vmin=50, vmax=300)
+                .background_gradient(subset=['Pred. EE (%)'],    cmap='RdYlGn',   vmin=40, vmax=100)
+                .background_gradient(subset=['Score'],           cmap='Blues'),
+            use_container_width=True, height=320
+        )
+        st.markdown("""<div class="box-info">
+            <strong>Score</strong> = weighted sum of size and EE% sub-scores. Higher = better overall.
+            Diversity filter ensures recommendations span varied drug/polymer ratios.
+        </div>""", unsafe_allow_html=True)
+        st.download_button("📥  Download CSV",
+            display.to_csv(index=False),
+            f"nanoformula_results_{datetime.now().strftime('%Y%m%d_%H%M')}.csv", "text/csv")
+
+    # ─── TAB 2: CHARTS ──────────────────────────────────────────
+    with tab2:
+        st.markdown('<div class="sec-title"><span class="sec-dot"></span>Visual Analysis</div>',
+                    unsafe_allow_html=True)
+        c1, c2 = st.columns(2)
+
+        with c1:
+            fig, ax = plt.subplots(figsize=(7, 4.8))
+            norm   = plt.Normalize(recs['pred_EE'].min(), recs['pred_EE'].max())
+            colors = plt.cm.cool(norm(recs['pred_EE']))
+            ax.barh(range(len(recs)), recs['pred_size'], color=colors, height=0.6, edgecolor='none')
+            ax.axvline(target_size, color='#ff6b6b', lw=1.5, ls='--', alpha=0.85, label=f'Target: {target_size} nm')
+            ax.set_yticks(range(len(recs)))
+            ax.set_yticklabels([f"F{i+1}" for i in range(len(recs))], fontsize=9)
+            ax.set_xlabel('Predicted Particle Size (nm)', fontsize=9)
+            ax.set_title('Ranked Formulations by Particle Size', fontsize=10, fontweight='bold', pad=12)
+            ax.legend(fontsize=8); ax.grid(axis='x', lw=0.5)
+            for i, v in enumerate(recs['pred_size']):
+                ax.text(v + 1.5, i, f'{v:.1f}', va='center', fontsize=8, color='#90b8d8')
+            sm = cm.ScalarMappable(cmap='cool', norm=norm); sm.set_array([])
+            cb = fig.colorbar(sm, ax=ax, pad=0.01, fraction=0.025)
+            cb.set_label('EE%', fontsize=8); cb.ax.tick_params(labelsize=7)
+            plt.tight_layout(); st.pyplot(fig)
+
+        with c2:
+            fig2, ax2 = plt.subplots(figsize=(7, 4.8))
+            sc = ax2.scatter(recs['pred_size'], recs['pred_EE'], s=350,
+                             c=recs['score'], cmap='plasma',
+                             edgecolors='#3a6a9a', linewidth=1.2, alpha=0.92, zorder=3)
+            ax2.axvspan(0, target_size, alpha=0.04, color='#00d28c')
+            ax2.axhspan(min_ee, 100,    alpha=0.04, color='#00aaff')
+            ax2.axvline(target_size, color='#ff6b6b', lw=1.2, ls='--', alpha=0.6)
+            ax2.axhline(min_ee,      color='#4a9eff', lw=1.2, ls='--', alpha=0.6)
+            for i in range(len(recs)):
+                ax2.annotate(f'F{i+1}', (recs.iloc[i]['pred_size'], recs.iloc[i]['pred_EE']),
+                             fontsize=9, fontweight='bold', ha='center', va='center', color='white')
+            ax2.set_xlabel('Predicted Particle Size (nm)', fontsize=9)
+            ax2.set_ylabel('Predicted EE%', fontsize=9)
+            ax2.set_title('Pareto Space: Size vs. Encapsulation Efficiency', fontsize=10, fontweight='bold', pad=12)
+            ax2.grid(lw=0.5)
+            cb2 = fig2.colorbar(sc, ax=ax2, pad=0.01, fraction=0.025)
+            cb2.set_label('Score', fontsize=8); cb2.ax.tick_params(labelsize=7)
+            plt.tight_layout(); st.pyplot(fig2)
+
+        c3, c4 = st.columns(2)
+        with c3:
+            fig3, ax3 = plt.subplots(figsize=(7, 4))
+            sc3 = ax3.scatter(recs['drug/polymer'], recs['pred_size'], s=250,
+                              c=recs['pred_EE'], cmap='YlGn',
+                              edgecolors='#2a4a6a', linewidth=1, alpha=0.9)
+            ax3.axhline(target_size, color='#ff6b6b', lw=1.2, ls='--', alpha=0.7)
+            for i in range(len(recs)):
+                ax3.annotate(f'F{i+1}', (recs.iloc[i]['drug/polymer'], recs.iloc[i]['pred_size']),
+                             textcoords='offset points', xytext=(6, 4), fontsize=8, color='#8ab0d0')
+            ax3.set_xlabel('Drug/Polymer Ratio', fontsize=9)
+            ax3.set_ylabel('Predicted Particle Size (nm)', fontsize=9)
+            ax3.set_title('Drug/Polymer Ratio vs. Particle Size', fontsize=10, fontweight='bold', pad=12)
+            ax3.grid(lw=0.5)
+            cb3 = fig3.colorbar(sc3, ax=ax3, pad=0.01, fraction=0.025)
+            cb3.set_label('EE%', fontsize=8); cb3.ax.tick_params(labelsize=7)
+            plt.tight_layout(); st.pyplot(fig3)
+
+        with c4:
+            fig4, ax4 = plt.subplots(figsize=(7, 4))
+            sc4 = ax4.scatter(recs['surfactant_concentration'], recs['pred_size'], s=250,
+                              c=recs['surfactant_HLB'], cmap='RdYlBu',
+                              edgecolors='#2a4a6a', linewidth=1, alpha=0.9)
+            ax4.axhline(target_size, color='#ff6b6b', lw=1.2, ls='--', alpha=0.7)
+            for i in range(len(recs)):
+                ax4.annotate(f'F{i+1}', (recs.iloc[i]['surfactant_concentration'], recs.iloc[i]['pred_size']),
+                             textcoords='offset points', xytext=(6, 4), fontsize=8, color='#8ab0d0')
+            ax4.set_xlabel('Surfactant Concentration (%)', fontsize=9)
+            ax4.set_ylabel('Predicted Particle Size (nm)', fontsize=9)
+            ax4.set_title('Surfactant Concentration vs. Particle Size', fontsize=10, fontweight='bold', pad=12)
+            ax4.grid(lw=0.5)
+            cb4 = fig4.colorbar(sc4, ax=ax4, pad=0.01, fraction=0.025)
+            cb4.set_label('Surfactant HLB', fontsize=8); cb4.ax.tick_params(labelsize=7)
+            plt.tight_layout(); st.pyplot(fig4)
+
+    # ─── TAB 3: SEARCH SPACE ────────────────────────────────────
+    with tab3:
+        st.markdown('<div class="sec-title"><span class="sec-dot"></span>Full Search Space Analysis</div>',
+                    unsafe_allow_html=True)
+        st.markdown(f"""<div class="box-info">
+            Distribution of all <strong>20,000</strong> screened candidates.
+            <strong>{hit_rate:,}</strong> candidates ({hit_rate/200:.1f}%) achieved size ≤ {target_size} nm.
+        </div>""", unsafe_allow_html=True)
+
+        c1, c2 = st.columns(2)
+        with c1:
+            fig5, ax5 = plt.subplots(figsize=(7, 4))
+            ax5.hist(cdf['pred_size'], bins=60, color='#00d28c', alpha=0.7, edgecolor='none')
+            ax5.axvline(target_size, color='#ff6b6b', lw=2, ls='--', label=f'Target: {target_size} nm')
+            ax5.axvline(cdf['pred_size'].median(), color='#ffd700', lw=1.5, ls=':',
+                        label=f"Median: {cdf['pred_size'].median():.0f} nm")
+            ax5.set_xlabel('Predicted Particle Size (nm)', fontsize=9)
+            ax5.set_ylabel('Frequency', fontsize=9)
+            ax5.set_title('Distribution of Predicted Particle Sizes', fontsize=10, fontweight='bold', pad=12)
+            ax5.legend(fontsize=8); ax5.grid(axis='y', lw=0.5)
+            plt.tight_layout(); st.pyplot(fig5)
+
+        with c2:
+            fig6, ax6 = plt.subplots(figsize=(7, 4))
+            ax6.hist(cdf['pred_EE'], bins=60, color='#00aaff', alpha=0.7, edgecolor='none')
+            ax6.axvline(min_ee, color='#ff6b6b', lw=2, ls='--', label=f'Min EE: {min_ee}%')
+            ax6.axvline(cdf['pred_EE'].median(), color='#ffd700', lw=1.5, ls=':',
+                        label=f"Median: {cdf['pred_EE'].median():.1f}%")
+            ax6.set_xlabel('Predicted Encapsulation Efficiency (%)', fontsize=9)
+            ax6.set_ylabel('Frequency', fontsize=9)
+            ax6.set_title('Distribution of Predicted EE%', fontsize=10, fontweight='bold', pad=12)
+            ax6.legend(fontsize=8); ax6.grid(axis='y', lw=0.5)
+            plt.tight_layout(); st.pyplot(fig6)
+
+        fig7, ax7 = plt.subplots(figsize=(14, 4.5))
+        sample   = cdf.sample(3000, random_state=42)
+        hit_mask = sample['pred_size'] <= target_size
+        ax7.scatter(sample[~hit_mask]['pred_size'], sample[~hit_mask]['pred_EE'],
+                    s=5, color='#1e3a5a', alpha=0.3, label='Outside target', rasterized=True)
+        ax7.scatter(sample[hit_mask]['pred_size'], sample[hit_mask]['pred_EE'],
+                    s=8, color='#00d28c', alpha=0.45, label=f'≤ {target_size} nm', rasterized=True)
+        ax7.scatter(recs['pred_size'], recs['pred_EE'],
+                    s=200, color='#ff6b6b', edgecolors='white', linewidth=1.5,
+                    zorder=5, label='Selected recommendations')
+        for i in range(len(recs)):
+            ax7.annotate(f'F{i+1}', (recs.iloc[i]['pred_size'], recs.iloc[i]['pred_EE']),
+                         textcoords='offset points', xytext=(5, 5),
+                         fontsize=8, fontweight='bold', color='#ff9a9a')
+        ax7.axvline(target_size, color='#ff6b6b', lw=1.2, ls='--', alpha=0.6)
+        ax7.axhline(min_ee,      color='#4a9eff', lw=1.2, ls='--', alpha=0.6)
+        ax7.set_xlabel('Predicted Particle Size (nm)', fontsize=9)
+        ax7.set_ylabel('Predicted EE%', fontsize=9)
+        ax7.set_title('Full Search Space — 3,000 Sample Points (of 20,000 Screened)', fontsize=10, fontweight='bold', pad=12)
+        ax7.legend(fontsize=8, loc='upper right'); ax7.grid(lw=0.4)
+        plt.tight_layout(); st.pyplot(fig7)
+
+    # ─── TAB 4: PROTOCOL ────────────────────────────────────────
+    with tab4:
+        st.markdown('<div class="sec-title"><span class="sec-dot"></span>Suggested Laboratory Protocol</div>',
+                    unsafe_allow_html=True)
+        best = recs.iloc[0]
+        st.markdown(f"""<div class="box-info">
+            Protocol for <strong>Formulation F1</strong> — top-ranked candidate.
+            Predicted particle size: <strong>{best['pred_size']:.1f} nm</strong>,
+            EE%: <strong>{best['pred_EE']:.1f}%</strong>.
+            Based on <em>nanoprecipitation (solvent displacement)</em> method.
+        </div>""", unsafe_allow_html=True)
+
+        col_p1, col_p2 = st.columns([3, 2])
+        with col_p1:
+            st.markdown(f"""
+            <div class="protocol">
+                <div class="protocol-head">🔬 Nanoprecipitation Protocol — F1 ({best['pred_size']:.1f} nm | EE {best['pred_EE']:.1f}%)</div>
+
+                <div style="font-family:'Space Mono',monospace;font-size:0.68rem;color:rgba(0,210,140,0.45);letter-spacing:2px;margin-bottom:12px">MATERIALS</div>
+                <div class="p-step"><div class="p-num">M</div>
+                <div class="p-text">PLGA {best['polymer_MW']:.0f} kDa (LA/GA {best['LA/GA']:.2f}) &nbsp;·&nbsp;
+                Organic solvent (acetonitrile or acetone) &nbsp;·&nbsp; Surfactant (HLB {best['surfactant_HLB']:.1f})
+                &nbsp;·&nbsp; Deionized water (pH {best['pH']:.2f}) &nbsp;·&nbsp; Drug compound</div></div>
+
+                <div style="font-family:'Space Mono',monospace;font-size:0.68rem;color:rgba(0,210,140,0.45);letter-spacing:2px;margin:14px 0 10px">PROCEDURE</div>
+                <div class="p-step"><div class="p-num">1</div>
+                <div class="p-text"><strong>Organic phase:</strong> Dissolve PLGA {best['polymer_MW']:.0f} kDa in organic solvent. Add drug at drug/polymer = <strong>{best['drug/polymer']:.4f}</strong>. Ensure complete dissolution (sonicate briefly if needed).</div></div>
+                <div class="p-step"><div class="p-num">2</div>
+                <div class="p-text"><strong>Aqueous phase:</strong> Prepare surfactant at <strong>{best['surfactant_concentration']:.3f}%</strong> (w/v). Adjust pH to <strong>{best['pH']:.2f}</strong> using 0.1 M HCl or NaOH.</div></div>
+                <div class="p-step"><div class="p-num">3</div>
+                <div class="p-text"><strong>Nanoprecipitation:</strong> Add organic phase dropwise to aqueous phase (Aq/Org ratio = <strong>{best['aqueous/organic']:.2f}</strong>) under continuous magnetic stirring at 600–800 RPM, room temperature.</div></div>
+                <div class="p-step"><div class="p-num">4</div>
+                <div class="p-text"><strong>Solvent removal:</strong> Stir nanosuspension for 3–4 h at RT under fume hood, or use rotary evaporation at 30°C until organic solvent is fully removed.</div></div>
+                <div class="p-step"><div class="p-num">5</div>
+                <div class="p-text"><strong>Purification:</strong> Ultracentrifuge at 15,000 × g, 30 min, 4°C. Discard supernatant. Resuspend in deionized water. Repeat ×3.</div></div>
+                <div class="p-step"><div class="p-num">6</div>
+                <div class="p-text"><strong>Lyophilization:</strong> Freeze-dry with 5% trehalose cryoprotectant. Pre-freeze at −80°C, lyophilize 48 h. Store at −20°C.</div></div>
+                <div class="p-step"><div class="p-num">7</div>
+                <div class="p-text"><strong>Characterization:</strong> DLS — size &lt; {target_size} nm, PDI &lt; 0.25, Zeta &gt; |±20 mV|. EE% by UV-Vis spectrophotometry post membrane separation. Confirm morphology by TEM.</div></div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        with col_p2:
+            st.markdown("""<div style="font-family:'Syne',sans-serif;font-size:0.9rem;font-weight:700;color:#e8f4ff;margin-bottom:12px">
+                All Recommendations
+            </div>""", unsafe_allow_html=True)
+            for i, row in recs.iterrows():
+                bc = "#00d28c" if i == 0 else "rgba(255,255,255,0.08)"
+                st.markdown(f"""
+                <div style="background:rgba(255,255,255,0.02);border:1px solid {bc};border-radius:12px;padding:12px 14px;margin-bottom:10px">
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+                        <span style="font-family:'Syne',sans-serif;font-weight:700;color:#e8f4ff">F{i+1}</span>
+                        <span style="font-family:'Space Mono',monospace;font-size:0.75rem;color:#00d28c">
+                            {row['pred_size']:.1f} nm · EE {row['pred_EE']:.1f}%
+                        </span>
+                    </div>
+                    <div style="font-size:0.73rem;color:rgba(150,185,220,0.5);line-height:1.9">
+                        PLGA {row['polymer_MW']:.0f} kDa &nbsp;·&nbsp; LA/GA {row['LA/GA']:.2f} &nbsp;·&nbsp; D/P {row['drug/polymer']:.4f}<br>
+                        Surf. {row['surfactant_concentration']:.3f}% (HLB {row['surfactant_HLB']:.1f}) &nbsp;·&nbsp;
+                        Aq/Org {row['aqueous/organic']:.2f} &nbsp;·&nbsp; pH {row['pH']:.2f}
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+
+            proto_df = recs[['drug/polymer','polymer_MW','LA/GA','surfactant_concentration',
+                              'surfactant_HLB','aqueous/organic','pH','pred_size','pred_EE']].copy()
+            proto_df.insert(0, 'Formulation', [f'F{i+1}' for i in range(len(recs))])
+            proto_df.columns = ['Formulation','Drug/Polymer','PLGA MW (kDa)','LA/GA',
+                                 'Surf. Conc (%)','Surf. HLB','Aq/Org','pH',
+                                 'Pred. Size (nm)','Pred. EE (%)']
+            st.download_button("📥  Download Protocol CSV",
+                proto_df.to_csv(index=False),
+                f"nanoformula_protocol_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+                "text/csv", use_container_width=True)
+
+# ══════════════════════════════════════════════════════════════════
+# FOOTER
+# ══════════════════════════════════════════════════════════════════
+st.markdown("""
+<div class="app-footer">
+    NANOFORMULA AI &nbsp;·&nbsp; PLGA FORMULATION OPTIMIZER &nbsp;·&nbsp;
+    R² = 0.88 · MAE ±22 nm &nbsp;·&nbsp; 433 TRAINING FORMULATIONS &nbsp;·&nbsp;
+    HARDIK SOOD &nbsp;·&nbsp; IIT (BHU) VARANASI
+</div>
+""", unsafe_allow_html=True)
 
