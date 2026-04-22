@@ -221,13 +221,175 @@ if "PLGA" in selected_polymer:
             "Value": ["0.88", "22.4 nm", "29.1 nm", "IIT BHU Repository"]
         }))
 
-# ========== CHITOSAN WORKFLOW (SIMILAR UI IMPROVEMENTS) ==========
+# ========== CHITOSAN WORKFLOW ==========
 elif "Chitosan" in selected_polymer:
-    st.markdown("### Chitosan-TPP Ionotropic Gelation Optimizer")
-    # ... Similar UI structure for Chitosan ...
-    # (Logic provided in your original code fits here)
-    st.warning("Note: Chitosan model currently supports blank nanoparticles only.")
-    # (Rest of chitosan logic)
+    tab1, tab2 = st.tabs(["🎯 Optimization Engine", "🧪 Lab Protocol & Model Info"])
+    
+    with tab1:
+        st.markdown("### Chitosan-TPP Ionotropic Gelation Optimizer")
+        st.warning("⚠️ **Note:** The Chitosan model currently supports size prediction for blank nanoparticles only based on 44 formulations.")
+        
+        # Grid layout for inputs
+        col_a, col_b = st.columns(2)
+        with col_a:
+            chitosan_mode = st.selectbox("Chitosan Selection", ["Auto-optimize (find best type)", "I have specific chitosan"])
+            if chitosan_mode == "I have specific chitosan":
+                chitosan_mw = st.selectbox("Chitosan MW (kDa)", [5, 20, 50, 310], 
+                                           format_func=lambda x: f"{x} kDa ({'HMW' if x==310 else 'LMW' if x==50 else f'{x} kDa'})")
+                fix_mw = True
+            else:
+                chitosan_mw = None
+                fix_mw = False
+                
+        with col_b:
+            target_size_cs = st.slider("Target Size (nm)", 50, 250, 150, 10, key="cs_size")
+            n_recs_cs = st.slider("# Recommendations", 3, 10, 5, 1, key="cs_recs")
+
+        if st.button("RUN CHITOSAN OPTIMIZATION", use_container_width=True):
+            with st.spinner('🔬 Running Monte Carlo simulation for Chitosan...'):
+                chitosan_features = models['chitosan_features']
+                
+                # Search space
+                if fix_mw:
+                    mw_options = [chitosan_mw]
+                else:
+                    mw_options = [5, 20, 50, 310]
+                    
+                conc_options = np.linspace(0.10, 1.0, 25).tolist()
+                tpp_options = np.linspace(0.10, 1.0, 25).tolist()
+                
+                random.seed(42)
+                np.random.seed(42)
+                
+                n_candidates = 10000
+                candidates = []
+                
+                for _ in range(n_candidates):
+                    mw = random.choice(mw_options)
+                    conc = random.choice(conc_options)
+                    tpp = random.choice(tpp_options)
+                    
+                    candidate = {
+                        'chitosan_MW': mw,
+                        'chitosan_conc': conc,
+                        'TPP_conc': tpp,
+                        'chitosan_TPP_ratio': conc / tpp,
+                        'conc_x_TPP': conc * tpp,
+                        'MW_x_conc': mw * conc,
+                        'MW_x_TPP': mw * tpp,
+                        'log_MW': np.log10(mw),
+                        'total_solute': conc + tpp,
+                        'chitosan_fraction': conc / (conc + tpp)
+                    }
+                    candidates.append(candidate)
+                    
+                cand_df = pd.DataFrame(candidates)
+                X_cand = cand_df[chitosan_features]
+                cand_df['pred_size'] = models['chitosan_size'].predict(X_cand)
+                
+                # Score
+                cand_df['score'] = np.where(
+                    cand_df['pred_size'] <= target_size_cs,
+                    (target_size_cs - cand_df['pred_size']) / target_size_cs, -0.5)
+                    
+                # Get diverse recommendations
+                top = cand_df.nlargest(n_recs_cs * 3, 'score')
+                diverse = []
+                used_mw = set()
+                
+                for _, row in top.iterrows():
+                    mw = row['chitosan_MW']
+                    if mw not in used_mw or len(diverse) < 2:
+                        diverse.append(row)
+                        used_mw.add(mw)
+                    if len(diverse) >= n_recs_cs:
+                        break
+                        
+                if len(diverse) < n_recs_cs:
+                    diverse = [row for _, row in top.head(n_recs_cs).iterrows()]
+                    
+                recs_cs = pd.DataFrame(diverse).sort_values('pred_size').reset_index(drop=True)
+                
+                # Save best to session state for the Protocol Tab
+                st.session_state['best_cs'] = recs_cs.iloc[0]
+                
+                # RESULTS DISPLAY
+                st.markdown("---")
+                st.subheader("Predicted Optimal Formulations")
+                
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Search Space", f"{n_candidates:,} trials")
+                c2.metric(f"Target Achievement (< {target_size_cs}nm)", f"{(cand_df['pred_size'] < target_size_cs).sum():,}")
+                c3.metric("Optimum Size", f"{recs_cs['pred_size'].min():.1f} nm")
+                
+                # Display Dataframe
+                mw_type_map = {5: '5 kDa', 20: '20 kDa', 50: 'LMW (~50 kDa)', 310: 'HMW (~310 kDa)'}
+                display_cs = recs_cs[['chitosan_MW', 'chitosan_conc', 'TPP_conc', 'chitosan_TPP_ratio', 'pred_size']].copy()
+                display_cs['Chitosan Type'] = display_cs['chitosan_MW'].map(mw_type_map)
+                display_cs = display_cs[['Chitosan Type', 'chitosan_MW', 'chitosan_conc', 'TPP_conc', 'chitosan_TPP_ratio', 'pred_size']]
+                display_cs.columns = ['Chitosan Type', 'MW (kDa)', 'Chitosan Conc (mg/mL)', 'TPP Conc (mg/mL)', 'CS:TPP Ratio', 'Pred. Size (nm)']
+                
+                st.dataframe(display_cs.style.format({
+                    'MW (kDa)': '{:.0f}', 'Chitosan Conc (mg/mL)': '{:.2f}', 'TPP Conc (mg/mL)': '{:.2f}',
+                    'CS:TPP Ratio': '{:.2f}', 'Pred. Size (nm)': '{:.1f}'
+                }).background_gradient(subset=['Pred. Size (nm)'], cmap='Greens_r'), use_container_width=True)
+                
+                # Plots with Seaborn matching paper-ready style
+                p1, p2 = st.columns(2)
+                with p1:
+                    fig1, ax1 = plt.subplots()
+                    # Custom color palette based on target success
+                    colors = ['#10B981' if s < target_size_cs else '#EF4444' for s in recs_cs['pred_size']]
+                    sns.barplot(x=recs_cs.index, y=recs_cs['pred_size'], palette=colors, ax=ax1, edgecolor=".2")
+                    ax1.axhline(target_size_cs, color='black', ls='--', linewidth=1.5, label=f'Target ({target_size_cs} nm)')
+                    ax1.set_xticklabels([f"F{i+1}" for i in range(len(recs_cs))])
+                    ax1.set_ylabel("Predicted Size (nm)")
+                    ax1.set_title("Predicted Particle Sizes")
+                    ax1.legend()
+                    st.pyplot(fig1)
+                    
+                with p2:
+                    fig2, ax2 = plt.subplots()
+                    sns.scatterplot(data=recs_cs, x='chitosan_conc', y='pred_size', 
+                                    hue='chitosan_MW', s=250, palette="viridis", edgecolor="black", ax=ax2)
+                    ax2.axhline(target_size_cs, color='red', ls='--', alpha=0.5)
+                    ax2.set_xlabel("Chitosan Concentration (mg/mL)")
+                    ax2.set_ylabel("Predicted Size (nm)")
+                    ax2.set_title("Concentration vs. Size Matrix")
+                    st.pyplot(fig2)
+
+    with tab2:
+        st.markdown("### 🧪 Standardized Experimental Protocol")
+        if 'best_cs' in st.session_state:
+            best = st.session_state['best_cs']
+            mw_type_map = {5: '5 kDa', 20: '20 kDa', 50: 'LMW (~50 kDa)', 310: 'HMW (~310 kDa)'}
+            
+            st.info(f"""
+            **Optimal Parameters (Predicted Size: {best['pred_size']:.1f} nm)**
+            
+            **Materials Required:**
+            * Chitosan: **{mw_type_map.get(best['chitosan_MW'], '')}** ({best['chitosan_MW']:.0f} kDa)
+            * Sodium Tripolyphosphate (TPP)
+            * 1% Acetic acid solution (v/v)
+            * Deionized water
+            
+            **Formulation Steps:**
+            1. Dissolve chitosan to a final concentration of **{best['chitosan_conc']:.2f} mg/mL** in 1% acetic acid.
+            2. Prepare TPP solution at **{best['TPP_conc']:.2f} mg/mL** in deionized water.
+            3. Ensure the CS:TPP mass ratio is maintained at exactly **{best['chitosan_TPP_ratio']:.2f}**.
+            4. Add TPP solution dropwise to the chitosan solution under constant magnetic stirring (500-700 RPM).
+            5. Allow cross-linking to proceed by stirring for 30 minutes at room temperature.
+            6. Characterize immediately via DLS for particle size, PDI, and zeta potential.
+            """)
+        else:
+            st.info("👈 Run the Optimization Engine in the previous tab to generate a targeted laboratory protocol.")
+            
+        st.markdown("---")
+        st.markdown("### 📊 Chitosan Model Information")
+        st.table(pd.DataFrame({
+            "Metric": ["Algorithm", "Training Dataset", "R² Score", "Accuracy Margin"],
+            "Value": ["Random Forest", "44 Formulations", "0.83", "±15-20 nm"]
+        }))
 
 # ========== FOOTER ==========
 st.markdown("---")
