@@ -1,6 +1,6 @@
 """
 NanoFormula AI — PLGA Nanoparticle Formulation Optimizer
-ML-driven virtual screening for particle size and encapsulation efficiency
+ML-driven virtual screening for particle size and entrapment efficiency
 Developed by: Hardik Sood | IIT (BHU) Varanasi
 """
 
